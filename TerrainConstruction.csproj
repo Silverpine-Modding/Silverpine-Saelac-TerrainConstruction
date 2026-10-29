@@ -3,7 +3,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <Nullable>enable</Nullable>
     <AssemblyName>TerrainConstruction</AssemblyName>
-    <Version>1.1.2</Version>
+    <Version>1.1.5</Version>
     <LangVersion>latest</LangVersion>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
@@ -14,10 +14,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="0Harmony">
-      <HintPath>..\..\BepInEx\core\0Harmony.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>..\..\Silverpine_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
@@ -41,6 +37,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
     <ProjectReference Include="..\ModdingTools\ModdingTools.csproj">
       <Private>false</Private>
     </ProjectReference>

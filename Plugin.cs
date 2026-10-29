@@ -12,12 +12,12 @@ using UnityEngine;
 namespace SilverpineMods.TerrainConstruction;
 
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-[BepInDependency(Silverpine.ModdingTools.Plugin.PluginGuid, "1.7.0")]
+[BepInDependency(Silverpine.ModdingTools.Plugin.PluginGuid, "1.12.0")]
 public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "renegadex.silverpine.terrainconstruction";
     public const string PluginName = "Terrain Construction";
-    public const string PluginVersion = "1.1.2";
+    public const string PluginVersion = "1.1.5";
 
     private const string CategoryId = PluginGuid + ".category.terrains";
     private const string ProxyPrefix = "terrainconstruction_";
@@ -96,6 +96,10 @@ public sealed class Plugin : BaseUnityPlugin
             Harmony.CreateAndPatchAll(
                 typeof(ForcedWinterSeasonPatch),
                 PluginGuid + ".forced-winter");
+            Harmony.CreateAndPatchAll(typeof(FloorTerrainSelectionPatch), PluginGuid + ".terrain-layers");
+            Harmony.CreateAndPatchAll(typeof(FloorWaterValidationPatch), PluginGuid + ".terrain-layers");
+            Harmony.CreateAndPatchAll(typeof(TerrainAnimationTickPatch), PluginGuid + ".terrain-animation");
+            Harmony.CreateAndPatchAll(typeof(TerrainAnimationResetPatch), PluginGuid + ".terrain-animation");
             RegisterTerrainConstructions();
             Logger.LogInfo(
                 $"Registered the Terrains construction category with " +
@@ -107,6 +111,8 @@ public sealed class Plugin : BaseUnityPlugin
                 "Terrain construction registration failed; rolling back. " +
                 exception);
             new Harmony(PluginGuid + ".forced-winter").UnpatchSelf();
+            new Harmony(PluginGuid + ".terrain-layers").UnpatchSelf();
+            new Harmony(PluginGuid + ".terrain-animation").UnpatchSelf();
             RollBackRegistrationFailure();
             throw;
         }
@@ -162,6 +168,22 @@ public sealed class Plugin : BaseUnityPlugin
                 $"Terrain prefab '{sourcePrefabName}' was listed but could not be loaded.");
         string label = GetLabel(sourcePrefabName);
         Sprite preview = PrefabPreviewGenerator.GeneratePreview(source);
+        if (TerrainLayers.IsOverlayName(sourcePrefabName))
+        {
+            string overlayName = TerrainLayers.GetOverlayPrefabName(sourcePrefabName);
+            GameObject template = CloneInactiveTerrain(source, overlayName);
+            try
+            {
+                TerrainOverlay.ConfigureTemplate(template);
+                prefabRegistrations.Add(SerializablePrefabs.Register(PluginGuid, overlayName, template));
+                source = template;
+            }
+            catch
+            {
+                Destroy(template);
+                throw;
+            }
+        }
         string proxyName = ProxyPrefix + sourcePrefabName;
         string constructionId = PluginGuid + "." + sourcePrefabName;
         GameObject proxy = CreateProxy(proxyName, label, preview);
@@ -240,6 +262,8 @@ public sealed class Plugin : BaseUnityPlugin
         SerializablePrefabRegistration snowyRegistration;
         try
         {
+            if (TerrainLayers.IsOverlayName(sourcePrefabName))
+                TerrainOverlay.ConfigureTemplate(snowyTemplate);
             snowyRegistration = SerializablePrefabs.Register(
                 PluginGuid,
                 snowyPrefabName,
@@ -303,6 +327,13 @@ public sealed class Plugin : BaseUnityPlugin
         GameObject source,
         string prefabName)
     {
+        GameObject template = CloneInactiveTerrain(source, prefabName);
+        template.AddComponent<ForcedWinterTerrain>();
+        return template;
+    }
+
+    private static GameObject CloneInactiveTerrain(GameObject source, string prefabName)
+    {
         // Instantiating at a remote coordinate prevents Awake-time tile
         // registries from touching a real map cell. ITileRegistered components
         // are explicitly removed from those registries before the template is
@@ -312,7 +343,6 @@ public sealed class Plugin : BaseUnityPlugin
             new Vector3(100000f, 100000f, source.transform.position.z),
             source.transform.rotation);
         template.name = prefabName;
-        template.AddComponent<ForcedWinterTerrain>();
         foreach (ITileRegistered registered in
                  template.GetComponentsInChildren<ITileRegistered>(true))
             registered.Unregister();
@@ -456,6 +486,7 @@ internal sealed class TerrainEntry
     internal string SourcePrefabName { get; }
     internal GameObject Source { get; }
     internal Sprite Preview { get; }
+    internal bool IsOverlay => TerrainLayers.IsOverlayName(SourcePrefabName);
 }
 
 internal sealed class TerrainProxyDescription : MonoBehaviour, INPCVisibleObject
@@ -476,29 +507,36 @@ internal static class TerrainPlacement
             {
                 Preview = entry.Preview,
                 RequiresLineOfSight = false,
-                IsValidTarget = IsValidTarget,
+                IsValidTarget = tile => IsValidTarget(entry, tile),
                 Place = tile => PlaceTerrain(entry, tile),
                 InvalidTargetMessage =
+                    entry.IsOverlay ? "Place a ground tile beneath this overlay first." :
                     "Choose an existing terrain tile to replace."
             });
     }
 
-    private static bool IsValidTarget(Vector2Int tile) =>
-        Turfs.GetTurfGameObjects(tile).Any(Plugin.IsReplaceableTerrain);
+    private static bool IsValidTarget(TerrainEntry entry, Vector2Int tile) =>
+        Turfs.GetTurfGameObjects(tile).Any(item => Plugin.IsReplaceableTerrain(item) &&
+            (!entry.IsOverlay || !TerrainLayers.IsOverlay(item)));
 
     private static void PlaceTerrain(
         TerrainEntry entry,
         Vector2Int tile)
     {
-        GameObject[] replaced = Turfs.GetTurfGameObjects(tile)
-            .Where(Plugin.IsReplaceableTerrain)
-            .ToArray();
-        if (replaced.Length == 0)
+        if (!IsValidTarget(entry, tile))
         {
             UpperNotificationUI.Instance?.OneOff(
+                entry.IsOverlay ? "Place a ground tile beneath this overlay first." :
                 "Choose an existing terrain tile to replace.");
             return;
         }
+
+        // Replace only the chosen layer. The base is a real, independently
+        // saved terrain object, not a lossy prefab-name snapshot of the floor.
+        GameObject[] replaced = Turfs.GetTurfGameObjects(tile)
+            .Where(item => Plugin.IsReplaceableTerrain(item) &&
+                TerrainLayers.IsOverlay(item) == entry.IsOverlay)
+            .ToArray();
 
         foreach (GameObject oldTerrain in replaced)
             UnityEngine.Object.DestroyImmediate(oldTerrain);
@@ -514,21 +552,44 @@ internal static class TerrainPlacement
             registrar.Register();
 
         PlayerAbility_Construct.DestroyPlantAtPosition(tile);
-        RefreshAdjacentOvergrowth(tile);
+        RefreshPlacedTileVisuals(tile);
         if (ActionQueue.Instance != null && WorldInfoManager.Instance != null)
             ActionQueue.Instance.DoAfterXFrames(
                 1,
                 WorldInfoManager.Instance.CheckDarknessMode);
     }
 
-    private static void RefreshAdjacentOvergrowth(Vector2Int tile)
+    private static void RefreshPlacedTileVisuals(Vector2Int tile)
     {
-        for (Direction direction = Direction.Up; direction < (Direction)4; direction++)
+        try
         {
-            if (Turfs.TryGetTurfComponent<OvergrowthTile>(
-                    tile.GetDirectionPosition(direction),
-                    out var overgrowth))
-                overgrowth.Refresh();
+            // Dirt's AllowOvergrowth tag is registered during Awake. Refresh
+            // already-initialized neighbors now, as the native shovel does,
+            // instead of making those edges depend solely on the queued pass.
+            ModTileVisuals.Refresh(tile, includeNeighbors: true);
+        }
+        catch (Exception exception)
+        {
+            FrameworkDiagnostics.Report(Plugin.PluginGuid, "refresh existing terrain neighbors", exception);
+            Plugin.Log.LogWarning("Immediate terrain refresh failed: " + exception.Message);
+        }
+        // New seasonal/edge components still need their Start methods to finish.
+        RequestTileVisualRefresh(tile);
+    }
+
+    internal static void RequestTileVisualRefresh(Vector2Int tile)
+    {
+        try
+        {
+            // Includes water corners and waits for native Start/registration.
+            ModTileVisuals.RequestRefresh(tile, includeNeighbors: true);
+        }
+        catch (Exception exception)
+        {
+            // Placement has already succeeded; a visual-service failure must
+            // not escape into the placement callback or obscure that result.
+            FrameworkDiagnostics.Report(Plugin.PluginGuid, "refresh placed terrain", exception);
+            Plugin.Log.LogWarning("Deferred terrain refresh failed: " + exception.Message);
         }
     }
 }
