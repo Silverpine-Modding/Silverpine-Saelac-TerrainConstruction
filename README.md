@@ -2,12 +2,51 @@
 
 Adds a **Terrains** category to the Modding Tools construction window. The
 category discovers Silverpine's serialized `prefab_tile_*` resources and makes
-every visually distinct terrain/floor tile placeable at no material or hammer
-cost. The redundant Wood Bridge entry is omitted because it looks identical to
+visually distinct terrain/floor tiles not already offered by base-game construction
+placeable at no material or hammer cost. Rock Floor and Wood Floor are omitted;
+use the normal construction entries for those. Existing floors placed by earlier
+versions remain intact and can still be replaced with terrain or used beneath
+overlays. The redundant Wood Bridge entry is omitted because it looks identical to
 Wood Floor. The river-specific water prefab is likewise omitted; its visually
 and mechanically identical lake prefab is presented as **Water** instead.
 The generated Snowy Swamp Grass entry is also omitted because its winter
 sprites, tint, sounds, and description are identical to regular **Snow**.
+
+Unroofed entries also have an **(Interior / Roofed)** variant, including the snowy/frozen
+variants. These retain the original tile appearance and behavior while adding
+the native **Roofed** tag and the full-tile weather mask used by normal floors.
+Rain, snow, clouds and the native fog overlay use that mask; roof-aware gameplay
+and weather audio use the tag. Dry Dirt uses the existing **Roofed Dry Dirt**
+instead of adding a duplicate, and already-roofed tiles are not duplicated.
+The roof tag lives on a child, so it does not change water's native seasonal tags.
+These variants do not create named rooms or override the biome/season: Snow
+remains snowy, ordinary grass can still change with the season, and water still
+freezes/thaws normally. Global weather and ordinary outdoor tiles are unchanged.
+
+Interior overlays remain removable without changing the floor underneath. The
+roof belongs to its tile: replacing an interior base with an outdoor base, or
+removing an interior overlay, removes that tile's roof too. Another roofed tile
+at the same location can still provide shelter. Normal floor construction over
+an interior base remembers its registered prefab; deconstruction reactivates
+and restores that interior tile. Interior names and components persist through
+the normal save system. Keep this plugin installed when loading saves containing
+interior tiles (or replace them with native terrain before uninstalling).
+
+Structure Handler integration gives these prefabs the same readable labels in
+its quick-place catalog, brush status and placement messages, for example
+**Grass (Interior / Roofed)** and **Frozen Shallow Water (Interior / Roofed)**.
+Open the **Terrain** tab and search **Interior** or **Roofed**. Real mod terrain
+is grouped there even when its name contains "grass" or "rock"; construction-menu
+proxy objects are hidden so they cannot be mistaken for placeable terrain.
+Native descriptive-name consumers also receive a **roofed interior** prefix,
+including the seasonal name of the surface. Persisted prefab IDs are unchanged;
+raw IDs in structure files still contain `terrainconstruction_interior_`.
+Structure Handler is optional and no changes to its files are required.
+
+Version 1.1.8 also fixes 1.1.7's startup conflict with Structure Handler's floor
+restoration patch. Both mods now keep Structure Handler's persistence handling
+and activate the restored interior afterwards; registration is left to native
+Start if Structure Handler has not already done it.
 
 Selecting a base terrain replaces the existing ground tile. This also permits
 repainting deep water, abyss, and other impassable terrain. The placement ghost is owned by Modding Tools and remains
@@ -49,8 +88,8 @@ range, including abyss with grass and deep water with dry ground. Target
 validation does not require passable ground or line of sight. The old base objects and their
 colliders are removed before the chosen prefab is instantiated; no construction
 site or construction/deconstruction callbacks are used during terrain placement.
-The chosen prefab keeps its native components and behavior (including
-deconstruction on wood/rock floors).
+The chosen prefab keeps its native components and behavior. Previously placed
+wood/rock floors retain their native deconstruction behavior.
 
 Terrain with a real winter presentation also receives a persistent snowy or
 frozen variant. These variants mark cloned Silverpine tiles as forced-winter,
@@ -83,19 +122,42 @@ immediate and free.
 ## Verification
 
 Build the Release configuration, then run `Tests/TerrainChecks.csproj` with the
-game directory as its argument. The checks cover layer classification, saved
+game directory as its argument. The checks cover menu exclusions against the
+installed game's construction list, layer classification, saved
 prefab names, both patches against the installed game's IL, refresh calls,
 deconstruction/serialization wiring, and plugin lifecycle.
 Animation checks also compare the shared clock against native fixed-update
 timing, test late joins, and validate the hooks against the installed assembly.
+Run `Tests/InteriorTemplates/InteriorTemplateChecks.csproj` as well to exercise
+the real interior template configurator against a minimal component test host.
+Interior checks cover prefab-name round trips, overlay/animation classification,
+duplicate avoidance, native mask settings, unchanged water tags, serialization
+and floor-deconstruction restoration. The test host does not simulate Unity.
 
-In game, verify Bathhouse Water over a named Rock Floor, change the floor to
+With Structure Handler installed, build `Tests/RuntimeCompatibility/RuntimeCompatibility.csproj`
+and `Tests/RuntimeCompatibility/Host/Host.csproj` in Release, then run the host DLL
+with the game directory and the compatibility test EXE as arguments. This starts
+the game's Mono in a disposable process, applies both real restoration patches
+in both load orders, and checks the installed editor's patched labels/filters.
+No game or save is opened. Engine-internal-call warnings can appear in this
+standalone host; they do not substitute for in-game rendering/placement tests.
+
+In game, confirm the Terrains menu excludes Rock Floor and Wood Floor while the
+normal construction entries remain available. Build a named Rock Floor normally,
+place Bathhouse Water over it, then use normal construction to change the floor to
 Wood Floor while retaining the water, save/reload, and deconstruct only the
 water. Also test Dry Dirt surrounded by grass: the grass fringe should update
 without reloading. Automated checks do not execute Unity rendering or saves.
 For animation, place Bathhouse Water beside existing water several seconds apart,
 pan away/back, and save/reload; the surface frames should remain aligned. Check
 that frozen water stays frozen and ordinary fire animations remain unaffected.
+For interiors, compare adjacent outdoor/interior grass during rain, snow and fog;
+weather should remain outside but disappear over the interior cell. Test interior
+deep/shallow/bathhouse water, seasonal thaw, and frozen variants. Save/reload,
+leave/re-enter the area, then build/deconstruct a normal floor over interior grass.
+Confirm the roof persists or disappears with its owning tile, the underlying
+floor can still be changed beneath interior water, and roof masks do not leave
+gaps or hide the terrain/actors themselves. Back up a save before testing.
 
 ## Credits
 

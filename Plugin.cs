@@ -13,11 +13,12 @@ namespace SilverpineMods.TerrainConstruction;
 
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
 [BepInDependency(Silverpine.ModdingTools.Plugin.PluginGuid, "1.12.0")]
+[BepInDependency(StructureHandlerCompatibility.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
 public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "renegadex.silverpine.terrainconstruction";
     public const string PluginName = "Terrain Construction";
-    public const string PluginVersion = "1.1.5";
+    public const string PluginVersion = "1.1.8";
 
     private const string CategoryId = PluginGuid + ".category.terrains";
     private const string ProxyPrefix = "terrainconstruction_";
@@ -39,7 +40,6 @@ public sealed class Plugin : BaseUnityPlugin
             ["prefab_tile_icy_slip"] = "Slippery Ice",
             ["prefab_tile_icy_tiles"] = "Ice Tiles",
             ["prefab_tile_resin"] = "Resin",
-            ["prefab_tile_rock"] = "Rock Floor",
             ["prefab_tile_rock_mountain"] = "Mountain Rock",
             ["prefab_tile_rock_overgrown"] = "Overgrown Rock",
             ["prefab_tile_rock_temple"] = "Temple Rock",
@@ -49,8 +49,7 @@ public sealed class Plugin : BaseUnityPlugin
             ["prefab_tile_water_lake"] = "Water",
             ["prefab_tile_water_shallow"] = "Shallow Water",
             ["prefab_tile_water_shallow_swamp"] = "Shallow Swamp Water",
-            ["prefab_tile_water_swamp"] = "Swamp Water",
-            ["prefab_tile_wood"] = "Wood Floor"
+            ["prefab_tile_water_swamp"] = "Swamp Water"
         };
 
     private static readonly string[] TerrainOrder =
@@ -64,7 +63,6 @@ public sealed class Plugin : BaseUnityPlugin
         "prefab_tile_icy_slip",
         "prefab_tile_icy_tiles",
         "prefab_tile_resin",
-        "prefab_tile_rock",
         "prefab_tile_rock_mountain",
         "prefab_tile_rock_overgrown",
         "prefab_tile_rock_temple",
@@ -74,8 +72,7 @@ public sealed class Plugin : BaseUnityPlugin
         "prefab_tile_water_lake",
         "prefab_tile_water_shallow",
         "prefab_tile_water_shallow_swamp",
-        "prefab_tile_water_swamp",
-        "prefab_tile_wood"
+        "prefab_tile_water_swamp"
     };
 
     private static readonly Dictionary<string, TerrainEntry> TerrainEntries =
@@ -98,9 +95,11 @@ public sealed class Plugin : BaseUnityPlugin
                 PluginGuid + ".forced-winter");
             Harmony.CreateAndPatchAll(typeof(FloorTerrainSelectionPatch), PluginGuid + ".terrain-layers");
             Harmony.CreateAndPatchAll(typeof(FloorWaterValidationPatch), PluginGuid + ".terrain-layers");
+            Harmony.CreateAndPatchAll(typeof(InteriorFloorRestorePatch), PluginGuid + ".terrain-layers");
             Harmony.CreateAndPatchAll(typeof(TerrainAnimationTickPatch), PluginGuid + ".terrain-animation");
             Harmony.CreateAndPatchAll(typeof(TerrainAnimationResetPatch), PluginGuid + ".terrain-animation");
             RegisterTerrainConstructions();
+            StructureHandlerCompatibility.Initialize();
             Logger.LogInfo(
                 $"Registered the Terrains construction category with " +
                 $"{TerrainEntries.Count} placeable terrain variants.");
@@ -113,6 +112,7 @@ public sealed class Plugin : BaseUnityPlugin
             new Harmony(PluginGuid + ".forced-winter").UnpatchSelf();
             new Harmony(PluginGuid + ".terrain-layers").UnpatchSelf();
             new Harmony(PluginGuid + ".terrain-animation").UnpatchSelf();
+            new Harmony(StructureHandlerCompatibility.PatchId).UnpatchSelf();
             RollBackRegistrationFailure();
             throw;
         }
@@ -131,21 +131,7 @@ public sealed class Plugin : BaseUnityPlugin
             });
 
         List<string> prefabNames = SerializationManager.GetExistingPrefabNames()
-            .Where(name => name.StartsWith(
-                "prefab_tile_",
-                StringComparison.OrdinalIgnoreCase))
-            .Where(name => !string.Equals(
-                name,
-                WorldTeleporterPrefab,
-                StringComparison.OrdinalIgnoreCase))
-            .Where(name => !string.Equals(
-                name,
-                WoodBridgePrefab,
-                StringComparison.OrdinalIgnoreCase))
-            .Where(name => !string.Equals(
-                name,
-                RiverWaterPrefab,
-                StringComparison.OrdinalIgnoreCase))
+            .Where(IsTerrainMenuPrefab)
             .OrderBy(GetOrder)
             .ThenBy(GetLabel, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -160,6 +146,15 @@ public sealed class Plugin : BaseUnityPlugin
             TryRegisterSnowyTerrain(prefabName);
         }
     }
+
+    internal static bool IsTerrainMenuPrefab(string name) =>
+        name.StartsWith("prefab_tile_", StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(name, WorldTeleporterPrefab, StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(name, WoodBridgePrefab, StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(name, RiverWaterPrefab, StringComparison.OrdinalIgnoreCase) &&
+        // Keep the native floor prefabs and replacement/overlay handling intact;
+        // only omit duplicate choices already offered by normal construction.
+        !TerrainLayers.IsNativeFloor(name);
 
     private void RegisterTerrain(string sourcePrefabName)
     {
@@ -238,6 +233,8 @@ public sealed class Plugin : BaseUnityPlugin
             proxyRegistration.Unregister(destroyTemplate: true);
             throw;
         }
+
+        TryRegisterInteriorTerrain(sourcePrefabName, source, label, preview, GetOrder(sourcePrefabName));
     }
 
     private void TryRegisterSnowyTerrain(string sourcePrefabName)
@@ -320,6 +317,61 @@ public sealed class Plugin : BaseUnityPlugin
                 Preview = winterPreview,
                 StartPlacement = () => TerrainPlacement.Start(entry)
             });
+        constructionIds.Add(constructionId);
+
+        TryRegisterInteriorTerrain(snowyPrefabName, snowyTemplate, label, winterPreview, GetOrder(sourcePrefabName) + 1000);
+    }
+
+    private void TryRegisterInteriorTerrain(string sourceName, GameObject source, string label, Sprite preview, int order)
+    {
+        if (!TerrainInteriors.ShouldCreateVariant(sourceName, TerrainInteriors.HasRoof(source)))
+            return;
+
+        string interiorName = TerrainInteriors.GetPrefabName(sourceName);
+        GameObject template = CloneInactiveTerrain(source, interiorName);
+        try
+        {
+            SpriteMask nativeMask = SerializationManager.GetPrefabFromName("prefab_tile_rock").GetComponent<SpriteMask>();
+            TerrainInteriors.ConfigureTemplate(template, nativeMask);
+            prefabRegistrations.Add(SerializablePrefabs.Register(PluginGuid, interiorName, template));
+        }
+        catch
+        {
+            Destroy(template);
+            throw;
+        }
+
+        string interiorLabel = TerrainDisplayNames.InteriorLabel(label);
+        string proxyName = ProxyPrefix + interiorName;
+        string constructionId = PluginGuid + ".interior." + sourceName;
+        GameObject proxy = CreateProxy(proxyName, interiorLabel, preview);
+        try
+        {
+            prefabRegistrations.Add(SerializablePrefabs.Register(PluginGuid, proxyName, proxy,
+                new SerializablePrefabOptions { RequireNpcVisibleObject = true }));
+        }
+        catch
+        {
+            Destroy(proxy);
+            throw;
+        }
+
+        var entry = new TerrainEntry(interiorName, template, preview);
+        TerrainEntries.Add(proxyName, entry);
+        ConstructionMenu.Register(PluginGuid, new ConstructionDefinition
+        {
+            Id = constructionId,
+            PrefabName = proxyName,
+            Label = interiorLabel,
+            Category = CategoryId,
+            Order = order + 2000,
+            WorkMinutes = 0,
+            Mode = ConstructionMode.Immediate,
+            PlayerPropertyOnly = false,
+            RequiresHammer = false,
+            Preview = preview,
+            StartPlacement = () => TerrainPlacement.Start(entry)
+        });
         constructionIds.Add(constructionId);
     }
 
@@ -440,7 +492,7 @@ public sealed class Plugin : BaseUnityPlugin
         return index >= 0 ? index : TerrainOrder.Length + 100;
     }
 
-    private static string GetLabel(string prefabName)
+    internal static string GetLabel(string prefabName)
     {
         if (Labels.TryGetValue(prefabName, out string label))
             return label;
@@ -456,7 +508,7 @@ public sealed class Plugin : BaseUnityPlugin
                 .Select(word => char.ToUpperInvariant(word[0]) + word.Substring(1)));
     }
 
-    private static string GetSnowyLabel(string prefabName)
+    internal static string GetSnowyLabel(string prefabName)
     {
         string label = GetLabel(prefabName);
         if (string.Equals(

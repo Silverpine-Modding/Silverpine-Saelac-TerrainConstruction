@@ -29,6 +29,8 @@ internal static class TerrainLayers
 
     internal static string GetNativeName(string name)
     {
+        if (name.StartsWith(TerrainInteriors.PrefabPrefix, StringComparison.OrdinalIgnoreCase))
+            return TerrainInteriors.GetSourceName(name);
         // Include native instances and the existing frozen names so old saves
         // are classified correctly, without renaming their serialized records.
         if (name.StartsWith(SnowyPrefix, StringComparison.OrdinalIgnoreCase))
@@ -45,7 +47,8 @@ internal static class TerrainLayers
         Turfs.GetTurfGameObjects(position).Where(item => !IsOverlay(item)).ToList();
 
     internal static bool IsNativeFloor(string prefabName) =>
-        prefabName == "prefab_tile_wood" || prefabName == "prefab_tile_rock";
+        string.Equals(prefabName, "prefab_tile_wood", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(prefabName, "prefab_tile_rock", StringComparison.OrdinalIgnoreCase);
 
     internal static bool BlocksConstruction(Vector2Int position, TileTag tag, string prefabName)
     {

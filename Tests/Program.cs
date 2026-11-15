@@ -55,6 +55,23 @@ internal static class Checks
 
         MethodBase target = (MethodBase)Call("FloorWaterValidationPatch", "TargetMethod")!;
         using var nativeModule = ModuleDefinition.ReadModule(Path.Combine(game, "Silverpine_Data/Managed/Assembly-CSharp.dll"));
+        bool MenuIncludes(string name) => (bool)Call("Plugin", "IsTerrainMenuPrefab", name)!;
+        string[] nativeConstructionTerrain = nativeModule.Types.Single(t => t.Name == "PlayerAbility_Construct")
+            .Methods.Single(m => m.Name == "OnUse").Body.Instructions
+            .Where(i => i.OpCode.Code == Mono.Cecil.Cil.Code.Ldstr).Select(i => (string)i.Operand)
+            .Where(name => name.StartsWith("prefab_tile_", StringComparison.OrdinalIgnoreCase))
+            .Distinct().OrderBy(name => name).ToArray();
+        Check(nativeConstructionTerrain.SequenceEqual(new[] { "prefab_tile_rock", "prefab_tile_wood" }),
+            "installed base construction offers exactly the expected rock and wood terrain prefabs");
+        Check(nativeConstructionTerrain.All(name => !MenuIncludes(name) && !MenuIncludes(name.ToUpperInvariant())),
+            "all base construction terrain duplicates are excluded from the Terrains menu");
+        Check(new[] { "rock_mountain", "rock_overgrown", "rock_temple", "rock_temple_outside", "dirt_dry_roofed" }
+            .All(name => MenuIncludes("prefab_tile_" + name)), "distinct rocky and roofed terrain variants remain available");
+        Check(bases.Concat(overlays).Except(new[] { "wood", "rock", "water" })
+            .All(name => MenuIncludes("prefab_tile_" + name)), "other existing base terrain and overlay entries remain available");
+        Check(new[] { "prefab_tile_teleporter_world", "prefab_tile_wood_bridge", "prefab_tile_water", "prefab_furniture_firepit" }
+            .All(name => !MenuIncludes(name) && !MenuIncludes(name.ToUpperInvariant())),
+            "previous duplicate, transition-trigger, and non-terrain exclusions remain intact");
         // Read the native IL without invoking Harmony's Mono-only dynamic runtime.
         // Non-target operands remain opaque; these patches must preserve them.
         List<CodeInstruction> Instructions(MethodBase method, MethodInfo redirect)
@@ -97,6 +114,10 @@ internal static class Checks
         TypeDefinition Definition(string name) => module.Types.Single(t => t.Name == name);
         MethodReference[] Calls(string type, string method) => Definition(type).Methods.Single(m => m.Name == method)
             .Body.Instructions.Select(i => i.Operand).OfType<MethodReference>().ToArray();
+        Check(Calls("Plugin", "RegisterTerrainConstructions").Any(m => m.Name == "IsTerrainMenuPrefab"),
+            "terrain registration uses the tested menu filter");
+        Check(!Calls("Plugin", "IsReplaceableTerrain").Any(m => m.Name is "IsTerrainMenuPrefab" or "IsNativeFloor"),
+            "hiding native floors from the menu does not exclude existing floors from terrain replacement");
         Check(!Definition("Plugin").Methods.Any(m => m.Name is "OnDestroy" or "OnDisable"), "plugin lifecycle does not tear down on bootstrap destruction");
         Check(Definition("TerrainOverlay").Interfaces.Select(i => i.InterfaceType.Name).ToHashSet()
             .IsSupersetOf(new[] { "ISerializableMonoBehavior", "IDeconstructedHandler" }), "overlay removal and serialization use native interfaces");
@@ -113,6 +134,8 @@ internal static class Checks
         Check(!Definition("TerrainLayers").Methods.Where(m => m.HasBody).SelectMany(m => m.Body.Instructions)
             .Any(i => i.OpCode.Code == Mono.Cecil.Cil.Code.Stfld && i.Operand is FieldReference f && f.Name == "tags"), "construction exception does not disable native water tags");
         AnimationChecks.Run(assembly, Check);
+        InteriorChecks.Run(assembly, Check);
+        NamingChecks.Run(assembly, game, Check);
         Console.WriteLine($"{passed} checks passed. Unity placement, rendering, and save/load still require in-game verification.");
     }
 }
